@@ -1,12 +1,12 @@
-use std::{fmt, sync::Arc};
+use std::fmt;
 
 use vector_lib::lookup::event_path;
 
 use crate::{
     internal_events::{DROP_EVENT, ParserMissingFieldError},
     sinks::{
-        datadog::events::request_builder::DatadogEventsRequestBuilder, prelude::*,
-        util::http::HttpRequest,
+        datadog::events::request_builder::{DatadogEventsRequest, DatadogEventsRequestBuilder},
+        prelude::*,
     },
 };
 
@@ -16,7 +16,7 @@ pub struct DatadogEventsSink<S> {
 
 impl<S> DatadogEventsSink<S>
 where
-    S: Service<HttpRequest<Option<Arc<str>>>> + Send + 'static,
+    S: Service<DatadogEventsRequest> + Send + 'static,
     S::Future: Send + 'static,
     S::Response: DriverResponse + Send + 'static,
     S::Error: fmt::Debug + Into<crate::Error> + Send,
@@ -83,7 +83,7 @@ async fn ensure_required_fields(event: Event) -> Option<Event> {
 #[async_trait]
 impl<S> StreamSink<Event> for DatadogEventsSink<S>
 where
-    S: Service<HttpRequest<Option<Arc<str>>>> + Send + 'static,
+    S: Service<DatadogEventsRequest> + Send + 'static,
     S::Future: Send + 'static,
     S::Response: DriverResponse + Send + 'static,
     S::Error: fmt::Debug + Into<crate::Error> + Send,

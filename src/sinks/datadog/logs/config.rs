@@ -7,11 +7,13 @@ use vector_lib::{
 };
 use vrl::value::Kind;
 
+use hyper::{Body, client::connect::Connect};
+
 use super::{service::LogApiRetry, sink::LogSinkBuilder};
+use crate::config::ValidatedSink;
 use crate::{
     common::datadog,
-    config::ValidatedSink,
-    http::client_v1::HttpClient,
+    http::HttpClient,
     schema,
     sinks::{
         datadog::{DatadogCommonConfig, LocalDatadogCommonConfig, logs::service::LogApiService},
@@ -159,13 +161,16 @@ impl DatadogLogsConfig {
     ///
     /// Returns an error if the logs endpoint cannot be parsed or request headers
     /// are invalid.
-    pub fn build_processor(
+    pub fn build_processor<C>(
         &self,
         dd_common: &DatadogCommonConfig,
-        client: HttpClient,
+        client: HttpClient<Body, C>,
         dd_evp_origin: String,
         batch: BatcherSettings,
-    ) -> crate::Result<VectorSink> {
+    ) -> crate::Result<VectorSink>
+    where
+        C: Connect + Clone + Send + Sync + 'static,
+    {
         let default_api_key: Arc<str> = Arc::from(dd_common.default_api_key.inner());
         let request_limits = self.request.tower.into_settings();
 
@@ -192,7 +197,7 @@ impl DatadogLogsConfig {
             .settings(request_limits, LogApiRetry)
             .service(LogApiService::new(
                 client,
-                endpoint.into_v1(),
+                endpoint.into_uri(),
                 headers,
                 dd_evp_origin,
             )?);
@@ -232,7 +237,7 @@ impl DatadogLogsConfig {
             }),
             false,
         )?;
-        HttpClient::new(tls_settings, proxy)
+        Ok(HttpClient::new(tls_settings, proxy)?)
     }
 }
 

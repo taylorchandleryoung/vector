@@ -6,10 +6,11 @@ use std::{
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use http_1::{
+use http::{
     HeaderValue, Request, Uri,
-    header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderName},
+    header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE},
 };
+use hyper::{Body, client::connect::Connect};
 use tower::Service;
 use tracing::Instrument;
 use vector_lib::{
@@ -19,10 +20,14 @@ use vector_lib::{
 };
 
 use crate::{
-    http::client_v1::{HttpClient, full_body},
+    http::{HttpClient, HttpProxyConnector},
     sinks::{
         datadog::DatadogApiError,
-        util::{Compression, http::validate_headers, retries::RetryLogic},
+        util::{
+            Compression,
+            http::{OrderedHeaderName, validate_headers},
+            retries::RetryLogic,
+        },
     },
 };
 
@@ -92,14 +97,17 @@ impl DriverResponse for LogApiResponse {
 /// composed within a Tower "stack", such that we can easily and transparently
 /// provide retries, concurrency limits, rate limits, and more.
 #[derive(Debug, Clone)]
-pub struct LogApiService {
-    client: HttpClient,
+pub struct LogApiService<C = HttpProxyConnector> {
+    client: HttpClient<Body, C>,
     uri: Uri,
-    user_provided_headers: HeaderMap,
-    dd_evp_headers: HeaderMap,
+    user_provided_headers: BTreeMap<OrderedHeaderName, HeaderValue>,
+    dd_evp_headers: BTreeMap<OrderedHeaderName, HeaderValue>,
 }
 
-impl LogApiService {
+impl<C> LogApiService<C>
+where
+    C: Connect + Clone + Send + Sync + 'static,
+{
     /// Creates a logs API service with validated user and Datadog origin headers.
     ///
     /// # Errors
@@ -111,12 +119,12 @@ impl LogApiService {
         reason = "Preserve the constructor's public signature and header ownership."
     )]
     pub fn new(
-        client: HttpClient,
+        client: HttpClient<Body, C>,
         uri: Uri,
         headers: BTreeMap<String, String>,
         dd_evp_origin: String,
     ) -> crate::Result<Self> {
-        let user_provided_headers = validated_header_map(&headers)?;
+        let user_provided_headers = validate_headers(&headers)?;
 
         let dd_evp_headers: BTreeMap<String, String> = [
             ("DD-EVP-ORIGIN".to_string(), dd_evp_origin),
@@ -124,7 +132,7 @@ impl LogApiService {
         ]
         .into_iter()
         .collect();
-        let dd_evp_headers = validated_header_map(&dd_evp_headers)?;
+        let dd_evp_headers = validate_headers(&dd_evp_headers)?;
 
         Ok(Self {
             client,
@@ -135,28 +143,10 @@ impl LogApiService {
     }
 }
 
-/// Validates header names and values and converts them to a native `http 1` header map.
-///
-/// Entries are inserted in the sorted order of `validate_headers`, so the
-/// resulting map preserves the same header order as the legacy implementation.
-///
-/// # Errors
-///
-/// Returns an error if a header name or value is invalid.
-fn validated_header_map(headers: &BTreeMap<String, String>) -> crate::Result<HeaderMap> {
-    let validated = validate_headers(headers)?;
-    let mut map = HeaderMap::with_capacity(validated.len());
-    for (name, value) in validated {
-        let name = HeaderName::from_bytes(name.inner().as_str().as_bytes())
-            .map_err(|e| format!("Invalid header name '{}': {e}", name.inner()))?;
-        let value = HeaderValue::from_bytes(value.as_bytes())
-            .map_err(|e| format!("Invalid header value: {e}"))?;
-        map.insert(name, value);
-    }
-    Ok(map)
-}
-
-impl Service<LogApiRequest> for LogApiService {
+impl<C> Service<LogApiRequest> for LogApiService<C>
+where
+    C: Connect + Clone + Send + Sync + 'static,
+{
     type Response = LogApiResponse;
     type Error = DatadogApiError;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
@@ -168,8 +158,8 @@ impl Service<LogApiRequest> for LogApiService {
 
     // Emission of Error internal event is handled upstream by the caller
     fn call(&mut self, mut request: LogApiRequest) -> Self::Future {
-        let client = self.client.clone();
-        let http_request = Request::post(self.uri.clone())
+        let mut client = self.client.clone();
+        let http_request = Request::post(&self.uri)
             .header(CONTENT_TYPE, "application/json")
             .header("DD-API-KEY", request.api_key.to_string());
 
@@ -186,32 +176,28 @@ impl Service<LogApiRequest> for LogApiService {
         let mut http_request = http_request.header(CONTENT_LENGTH, request.body.len());
 
         if let Some(headers) = http_request.headers_mut() {
-            // Replace rather than append to any existing header values
             for (name, value) in &self.user_provided_headers {
-                headers.insert(name, value.clone());
+                // Replace rather than append to any existing header values
+                headers.insert(name.inner(), value.clone());
             }
             // Set DD EVP headers last so that they cannot be overridden.
             for (name, value) in &self.dd_evp_headers {
-                headers.insert(name, value.clone());
+                headers.insert(name.inner(), value.clone());
             }
         }
 
         let http_request = http_request
-            .body(request.body)
+            .body(Body::from(request.body))
             .expect("building HTTP request failed unexpectedly");
 
         Box::pin(async move {
-            DatadogApiError::from_result(
-                client
-                    .send(http_request.map(full_body))
-                    .in_current_span()
-                    .await,
+            DatadogApiError::from_result(client.call(http_request).in_current_span().await).map(
+                |_| LogApiResponse {
+                    event_status: EventStatus::Delivered,
+                    events_byte_size,
+                    raw_byte_size,
+                },
             )
-            .map(|_| LogApiResponse {
-                event_status: EventStatus::Delivered,
-                events_byte_size,
-                raw_byte_size,
-            })
         })
     }
 }

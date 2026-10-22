@@ -1,8 +1,6 @@
-//! Shared configuration, native HTTP healthchecks, and API errors for Datadog sinks.
-
 use futures_util::FutureExt;
-use http_1::{Request, Response, StatusCode, Uri};
-use hyper_1::body::Incoming;
+use http::{Request, StatusCode, Uri};
+use hyper::{body::Body, client::connect::Connect};
 use snafu::Snafu;
 use vector_lib::{
     config::AcknowledgementsConfig, configurable::configurable_component,
@@ -12,7 +10,7 @@ use vector_lib::{
 use super::Healthcheck;
 use crate::{
     common::datadog,
-    http::client_v1::{HttpClient, HttpError, empty_body},
+    http::{HttpClient, HttpError},
     sinks::{HealthcheckError, util::HttpEndpoint},
 };
 
@@ -146,7 +144,10 @@ impl DatadogCommonConfig {
     /// # Errors
     ///
     /// Returns an error if the validation endpoint cannot be parsed.
-    pub fn build_healthcheck(&self, client: HttpClient) -> crate::Result<Healthcheck> {
+    pub fn build_healthcheck<C>(&self, client: HttpClient<Body, C>) -> crate::Result<Healthcheck>
+    where
+        C: Connect + Clone + Send + Sync + 'static,
+    {
         let validate_endpoint = self.get_api_endpoint("/api/v1/validate")?;
 
         let api_key: String = self.default_api_key.clone().into();
@@ -162,26 +163,29 @@ impl DatadogCommonConfig {
     fn get_api_endpoint(&self, path: &str) -> crate::Result<Uri> {
         let base = datadog::get_api_base_endpoint(self.endpoint.as_deref(), self.site.as_str());
         let endpoint = HttpEndpoint::parse(&base)?.append_path(path)?;
-        Ok(endpoint.into_v1())
+        Ok(endpoint.into_uri())
     }
 }
 
 /// Makes a GET HTTP request to `<site>/api/v1/validate` using the provided client and API key.
-async fn build_healthcheck_future(
-    client: HttpClient,
+async fn build_healthcheck_future<C>(
+    client: HttpClient<Body, C>,
     validate_endpoint: Uri,
     api_key: String,
-) -> crate::Result<()> {
+) -> crate::Result<()>
+where
+    C: Connect + Clone + Send + Sync + 'static,
+{
     let request = Request::get(validate_endpoint)
         .header("DD-API-KEY", api_key)
-        .body(empty_body())
+        .body(hyper::Body::empty())
         .map_err(|e| format!("Failed to make HTTP(S) request: {e:?}"))?;
 
     let response = client.send(request).await?;
 
     match response.status() {
         StatusCode::OK => Ok(()),
-        other => Err(HealthcheckError::unexpected_status(other).into()),
+        other => Err(HealthcheckError::UnexpectedStatus { status: other }.into()),
     }
 }
 
@@ -208,14 +212,14 @@ pub enum DatadogApiError {
 }
 
 impl DatadogApiError {
-    /// Converts a native HTTP 1 Datadog response into an API result.
+    /// Converts a Datadog HTTP response into an API result.
     ///
     /// # Errors
     ///
     /// Returns an error for a failed request or a non-success HTTP status.
     pub fn from_result(
-        result: Result<Response<Incoming>, HttpError>,
-    ) -> Result<Response<Incoming>, DatadogApiError> {
+        result: Result<http::Response<Body>, HttpError>,
+    ) -> Result<http::Response<Body>, DatadogApiError> {
         match result {
             Ok(response) => {
                 match response.status() {

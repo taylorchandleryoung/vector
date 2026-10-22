@@ -1,4 +1,3 @@
-use http_1::Uri;
 use tower::ServiceBuilder;
 use vector_lib::{
     config::proxy::ProxyConfig, configurable::configurable_component, stream::BatcherSettings,
@@ -12,7 +11,7 @@ use super::{
 use crate::{
     common::datadog,
     config::{AcknowledgementsConfig, Input, SinkConfig, SinkContext, ValidatedSink},
-    http::client_v1::HttpClient,
+    http::HttpClient,
     sinks::{
         Healthcheck, VectorSink,
         datadog::{DatadogCommonConfig, LocalDatadogCommonConfig},
@@ -107,23 +106,23 @@ impl DatadogMetricsEndpoint {
     }
 }
 
-/// Maps Datadog metric endpoints to cached native HTTP 1 URIs.
+/// Maps Datadog metric endpoints to their actual URI.
 pub struct DatadogMetricsEndpointConfiguration {
-    series_endpoint: Uri,
-    sketches_endpoint: Uri,
+    series_endpoint: HttpEndpoint,
+    sketches_endpoint: HttpEndpoint,
 }
 
 impl DatadogMetricsEndpointConfiguration {
-    /// Creates native HTTP 1 endpoints for the metrics APIs.
-    pub fn new(series_endpoint: HttpEndpoint, sketches_endpoint: HttpEndpoint) -> Self {
+    /// Creates a new `DatadogMEtricsEndpointConfiguration`.
+    pub const fn new(series_endpoint: HttpEndpoint, sketches_endpoint: HttpEndpoint) -> Self {
         Self {
-            series_endpoint: series_endpoint.into_v1(),
-            sketches_endpoint: sketches_endpoint.into_v1(),
+            series_endpoint,
+            sketches_endpoint,
         }
     }
 
     /// Gets the URI for the given Datadog metrics endpoint.
-    pub fn get_uri_for_endpoint(&self, endpoint: DatadogMetricsEndpoint) -> Uri {
+    pub fn get_uri_for_endpoint(&self, endpoint: DatadogMetricsEndpoint) -> HttpEndpoint {
         match endpoint {
             DatadogMetricsEndpoint::Series { .. } => self.series_endpoint.clone(),
             DatadogMetricsEndpoint::Sketches => self.sketches_endpoint.clone(),

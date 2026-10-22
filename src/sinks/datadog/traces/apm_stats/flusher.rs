@@ -14,12 +14,9 @@ use super::{
     build_request,
 };
 use crate::{
-    http::client_v1::{HttpClient, full_body},
+    http::{BuildRequestSnafu, HttpClient},
     internal_events::DatadogTracesAPMStatsError,
-    sinks::{
-        HTTPV1RequestBuilderSnafu,
-        util::{Compression, Compressor},
-    },
+    sinks::util::{Compression, Compressor},
 };
 
 /// Flushes cached APM stats buckets to Datadog on a 10 second interval.
@@ -130,9 +127,9 @@ impl ApmStatsSender {
 
         let http_request = trace_api_request
             .into_http_request()
-            .context(HTTPV1RequestBuilderSnafu)?;
+            .context(BuildRequestSnafu)?;
 
-        self.client.send(http_request.map(full_body)).await?;
+        self.client.send(http_request).await?;
 
         Ok(())
     }
